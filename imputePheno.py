@@ -21,28 +21,6 @@ class traits:
 		self.sebeta = sebeta
 		self.zScore = float(beta)/float(sebeta)
 
-## This three functions are used to save or load
-## python object as pickle files
-### BEGIN Picle utilities ####
-def initalize_pickle_folder(name):
-	if not os.path.exists(name):
-		path = os.getcwd()
-		try:
-			os.mkdir(path + "/obj")
-		except OSError:
-			print ("Creation of the directory %s failed" % path)		
-
-def save_obj(obj, name):
-	with open('obj/'+ name + '.pkl', 'wb') as f:
-		pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
-	print ("Save data as Pickle file")
-
-def load_obj(name):
-	print ("Load data from Pickle file")	
-	with open('obj/' + name + '.pkl', 'rb') as f:
-		return pickle.load(f)
-### FINISH Picle utilities ####
-
 def detectFileHander(input_folder, study_name, trait_names):
 	file_handlers = []
 	for trait in trait_names:
@@ -51,37 +29,15 @@ def detectFileHander(input_folder, study_name, trait_names):
 		file_handlers.append(file_handler)
 	return file_handlers
 
-def getSNP2ZDictionary(file_handlers, trait_names):
-	snp2z_map = {}
-	index = 0
-	for handler in file_handlers:
-		for line in handler:
-			if "SNP" in line:
-				continue
-			data = line.split("\t")
-			snpID  = data[0]
-			beta   = data[7]
-			sebeta = data[8]
-			if snpID in snp2z_map:
-				snp2z_map[snpID].append(traits(trait_names[index], index, beta, sebeta))
-			else:
-				tmpList = []
-				tmpList.append(traits(trait_names[index], index, beta, sebeta))
-				snp2z_map[snpID] = tmpList
-		index = index + 1
-	return snp2z_map 
-
-def p_value(stat) :
-	return(2 * st.norm.pdf(-abs(stat), loc=0, scale=1))
-
 #compute the Z-score of phenotype to impute from all the other
 #phenoypes and correlation. We assume the first phenotype (index 0)
 #is the hard-to-collect phenotype that we want to impute.
 #Assumption: First phenotype (index 0) to impute using ALL phenotype
-def computeImpZ(R, Z):
+def computePheno(R, Y):
 	Sigma = R[1:,1:]
 	Rl    = R[1:,0:1]
-	return (np.dot(np.transpose(np.dot(np.linalg.inv(Sigma), Rl)), Z))
+	Sigma_inv = np.linalg.inv(Sigma)
+	return (np.matmul(np.matmul(Y, Sigma_inv),Rl))
 
 # This function assume the first phenotypes is getting
 # perdicted and all the other phenotypes are used to
@@ -105,66 +61,42 @@ def computeImpZAll (R, snp2z_map, output_file):
 			output_file_hander.write("%s\t%f\t%e\n"  %(snpID, Z[0,0], p_value(Z[0,0])) )
 	output_file_hander.close()
 
-def check_files(phenotype_list, trait_names, input_folder):
-	for name in trait_names:
-		if not name in phenotype_list:
-			print ("We expect a file for %s in your %s" %(name, input_folder))
-			raise Exception("At least one phenotype file is missing")
-
 def main (parser):
 	(options, args) = parser.parse_args()
-	cor_file      =  options.cor_file
-	study_name    =  options.study_name
-	toimpute_name =  options.toimpute_name
-	input_folder  = options.input_folder
-	output_file   = options.output_file
-
-	trait_names = [w.replace(input_folder+ "/" + study_name + "_", '').split(".")[0] for w in glob.glob(input_folder + "/" + study_name + "*")]
-
-	if (len(trait_names) <= 1):
-		print ("The %s does not have enough phenotypes or you given the wrong path" % input_folder)
-		sys.exit(0)
+	cor_file = options.cor_file
+	toimpute_name = options.toimpute_name
+	input_file = options.input_file
+	output_file = options.output_file
+	trait_names = list(pd.read_csv(input_file, delim_whitespace=True).columns.values)[1:]
+	print ("size %s" %(trait_names))	
 	
-	snp2z_map   = {}
 	to_impute_index = -1
 	all_phenotype_index = []
-
-	file_handlers = detectFileHander(input_folder, study_name, trait_names) 
-	initalize_pickle_folder(study_name)
-	if not (os.path.exists('obj/'+study_name + ".pkl")):
-		snp2z_map = getSNP2ZDictionary(file_handlers, trait_names)
-		save_obj(snp2z_map, study_name)
-	else:
-		snp2z_map = load_obj(study_name)
-	print ("size %i" %(len(snp2z_map)))	
-	
 	phenotype_list = list(pd.read_csv(cor_file, delim_whitespace=True).columns.values)
-	try:
-		check_files(phenotype_list, trait_names, input_folder)
-	except Exception as error:
-		print (err)	
-		sys.exit(0)		
-	
+	print (phenotype_list)
 	R = np.loadtxt(open(cor_file), skiprows=1) # load the phenotype correlation between all phenotypes in the correlation file
-	
 	to_impute_index = phenotype_list.index(toimpute_name)
 	all_phenotype_index.append(to_impute_index)
 	for phen in trait_names:
 		all_phenotype_index.append(phenotype_list.index(phen))	
-
 	R = R[all_phenotype_index, :]
 	R = R[:, all_phenotype_index]
-
-	computeImpZAll(R, snp2z_map, output_file)
+	phen_data = np.loadtxt(open(input_file), skiprows=1)
+	phen_mean = np.nanmean(phen_data[:,1:], axis=0)
+	phen_var  = np.nanstd(phen_data[:,1:], axis=0)
+	standadized_phen_data = (phen_data[:,1:]-phen_mean)/phen_var
+	impY = computePheno (R, standadized_phen_data)
+	outFileHandler = open(output_file, 'w')
+	outFileHandler.write("SID %s %s\n" % (' '.join(trait_names[1:]), toimpute_name))
+	for (ind_id, standadized_phen_val, imp_phen_val) in zip (phen_data[:,0], standadized_phen_data, impY):
+		outFileHandler.write ("%d %s %f\n" %(ind_id, ' '.join(map(str, standadized_phen_val)), imp_phen_val))
+	outFileHandler.close()
 
 if __name__== "__main__":
 	parser = optparse.OptionParser("usage: %prog [options] ")
-	parser.add_option("-i", "--inputFolder", dest="input_folder",
+	parser.add_option("-i", "--inputFile", dest="input_file",
     		default="", type="string",
-			help="specify the Folder name that consist of all the phenotyes")
-	parser.add_option("-n", "--studyName", dest="study_name",
-            default="", type="string",
-            help="specify the name of GWAS study")
+			help="specify the File name that consist of all the phenotyes")
 	parser.add_option("-f", "--phenotypeName", dest="toimpute_name",
             default="", type="string",
             help="specify the name of phenotype to impute")
